@@ -1,0 +1,201 @@
+#! /bin/bash
+
+set -e
+
+# ------------------------------------------------------------------------
+
+OUT_DIR=pgap_files
+
+function usage {
+    echo 1>&2 "Usage: $0 [options] genome1.fna [...] [-- pgap.py args]"
+
+    echo 1>&2 "-S STRAIN_NAME - strain name (required)"
+    echo 1>&2 "-f - force overwriting of existing files."
+    echo 1>&2 "-h - this message"
+    echo 1>&2 "-k - keep temporary files"
+    echo 1>&2 "-n - fake execution"
+    echo 1>&2 "-o OUT_DIR - Output directory [$OUT_DIR]"
+    echo 1>&2 "-p PGAP_DIR - Directory containing PGAP. Will download if not specified."
+    echo 1>&2 "-s SUBMOL_YAML - submol.yaml to use instead of generated"
+    echo 1>&2 "-t TAXON_ID - taxon id for species"
+
+    echo 1>&2 ''
+    echo 1>&2 "Either '-s' or '-t' option must be specified"
+
+    exit "$@"
+}    
+
+while getopts 'S:fhkno:p:s:t:' opt ; do
+    case "$opt" in
+
+	S) STRAIN_NAME="$OPTARG" ;;
+	f) FORCE=1 ;;
+	n) FAKE_IT=1 ;;
+	h) DISPLAY_HELP=1 ;;
+	k) KEEP_FILES=1 ;;
+	o) OUT_DIR="$OPTARG" ;;
+	p) PGAP_DIR="$OPTARG" ;;
+	s) SUBMOL_YAML="$OPTARG" ;;
+	t) TAXON_ID="$OPTARG" ;;
+
+	\?) usage 1 ;;
+	*) echo "Can't happen" ; exit 1 ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ "$DISPLAY_HELP" ] ; then
+    usage
+fi
+
+if [ -z "$SUBMOD_YAML" -a -z "$TAXON_ID" ] ; then
+    usage 1
+elif [ "$SUBMOD_YAML" -a "$TAXON_ID" ] ; then
+    usage 1
+fi
+
+if [ -z "$1" -o x"$1"x = x--x ] ; then
+    usage 1
+fi
+
+# ------------------------------------------------------------------------
+
+if [ -e $OUT_DIR -a -z "$FORCE" ] ; then
+    echo 1>&2 "Output directory already exists: $OUT_DIR"
+    exit 1
+fi
+
+rm -rf $OUT_DIR
+mkdir -p $OUT_DIR
+
+# ------------------------------------------------------------------------
+
+function run {
+    echo 1>&2 + "$@"
+    eval "$@"
+}
+
+function run_maybe {
+    if [ "$FAKE_IT" ] ; then
+	echo 1>&2 '### fake:' "$@"
+    else
+	echo 1>&2 + "$@"
+	eval "$@"
+    fi
+}
+
+if [ "$PGAP_DIR" ] ; then
+    run_maybe cp --archive ${PGAP_DIR} ${OUT_DIR}/temp
+    mkdir -p ${OUT_DIR}/temp # in case we faked it
+else
+    (
+	mkdir -p ${OUT_DIR}/temp
+	run cd ${OUT_DIR}/temp
+	run_maybe wget https://github.com/ncbi/pgap/raw/prod/scripts/pgap.py
+	run_maybe chmod +x pgap.py
+	run_maybe ./pgap.py --update
+    )
+fi
+
+# ------------------------------------------------------------------------
+
+rm -rf ${OUT_DIR}/temp/input
+rm -rf ${OUT_DIR}/temp/output
+
+mkdir -p ${OUT_DIR}/temp/input
+
+while [ -n "$1" -a x"$1"x != x--x ] ; do
+    cat "$1" >> ${OUT_DIR}/temp/input/genome.fna
+    shift 1
+done
+if [ x"$1"x == x--x ] ; then
+    shift 1
+fi
+
+# ------------------------------------------------------------------------
+
+function get_species {
+    TAXON_ID=$1
+    efetch -db taxonomy -id $TAXON_ID \
+	| (\
+	   read first_line
+	   read second_line
+	   case "$second_line" in
+	       species,*) : ok ;;
+	       *)
+		   echo 1>&2 "Taxid $TAXON_ID does not have species rank."
+		   return 1
+	   esac
+	   echo "$first_line" | sed -r -e 's/^[0-9]+[.] +//'
+    )
+}    
+
+
+if [ "$SUBMOL_YAML" ] ; then
+    cp --archive "$SUBMOL_YAML" ${OUT_DIR}/temp/input/submol.yaml
+elif [ "$TAXON_ID" ] ; then
+    SPECIES_NAME="$(get_species "$TAXON_ID")"
+    if [ $? != 0 ] ; then
+	exit 1
+    fi
+    cat $0.submol.yaml \
+	| sed -e 's/%%SPECIES%%/'"$SPECIES_NAME"'/g' \
+	| sed -e 's/%%STRAIN%%/'"$STRAIN_NAME"'/g' \
+	      > ${OUT_DIR}/temp/input/submol.yaml
+fi
+
+# ------------------------------------------------------------------------
+
+cat <<EOF > ${OUT_DIR}/temp/input/input.yaml
+fasta:
+  class: File
+  location: genome.fna
+submol:
+  class: File
+  location: submol.yaml
+
+EOF
+
+# ------------------------------------------------------------------------
+
+(
+    run	cd ${OUT_DIR}/temp
+    run_maybe ./pgap.py --output output "$@" input/input.yaml
+    if [ "$FAKE_IT" ] ; then
+	# check for input files
+	for f in input/genome.fna \
+		     input/input.yaml \
+		     input/submol.yaml
+	do
+	    if [ ! -e "$f" ] ; then
+		echo 1>&2 "internal error: $f missing"
+		exit 1
+	    fi
+	done
+	# fake output files
+	mkdir output
+	touch output/annot.faa
+	touch output/annot.fna
+	touch output/annot.gbk
+	touch output/annot.gff
+	touch output/annot.sqn
+	touch output/cwltool.log
+	cp --archive input/genome.fna output/
+	cp --archive input/submol.yaml output/
+    fi
+)
+
+# ------------------------------------------------------------------------
+
+cp --archive ${OUT_DIR}/temp/input ${OUT_DIR}/input
+cp --archive ${OUT_DIR}/temp/output ${OUT_DIR}/output
+if [ -z "$KEEP_FILES" ] ; then
+    (
+	set -x
+	chmod -R u+w ${OUT_DIR}/temp
+	rm -rf ${OUT_DIR}/temp
+    )
+fi
+
+# ------------------------------------------------------------------------
+

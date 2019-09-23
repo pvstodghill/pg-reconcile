@@ -1,0 +1,16 @@
+---
+image: pvstodghill/prokka
+version: 1.14.0__2019-08-30
+commands:
+  - prokka
+  - prokka-abricate_to_fasta_db
+  - prokka-biocyc_to_fasta_db
+  - prokka-build_kingdom_dbs
+  - prokka-cdd_to_hmm
+  - prokka-clusters_to_hmm
+  - prokka-genbank_to_fasta_db
+  - prokka-genpept_to_fasta_db
+  - prokka-hamap_to_hmm
+  - prokka-make_tarball
+  - prokka-tigrfams_to_hmm
+  - prokka-uniprot_to_fasta_db

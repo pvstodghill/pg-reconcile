@@ -1,0 +1,88 @@
+#! /usr/bin/env perl
+
+use strict;
+use warnings FATAL => 'all';
+use Carp::Always;
+
+# use FindBin;
+# use lib "$FindBin::Bin";
+# use Xyzzy;
+
+use constant { TRUE => 1, FALSE => 0 };
+
+# ------------------------------------------------------------------------
+# Process the command line
+# ------------------------------------------------------------------------
+
+use File::Basename;
+use Getopt::Std;
+
+our $opt_h;
+our $opt_t;
+
+sub usage {
+  my $progname = basename($0);
+  print STDERR "Usage: cat orig.fna | $progname [options] from1:to1 from2:to2 ...\n";
+  print STDERR "-h - print help\n";
+  print STDERR "-t FILE - accession translation list, each line \"from_i to_i\"\n";
+  exit(@_);
+}
+
+my $stat = getopts('ht:');
+if (!$stat) {
+  usage(1);
+}
+if ($opt_h) {
+  usage();
+}
+
+# ------------------------------------------------------------------------
+# Create the translation table
+# ------------------------------------------------------------------------
+
+my %xlate;
+
+foreach my $arg ( @ARGV ) {
+  my ($from,$to,$extra) = split(/:/,$arg);
+  (defined($to) && !defined($extra))
+    || die "Ill-formed arg: <$arg>,";
+  (!defined($xlate{$from}))
+    || die "Multiple rules: <$from>,";
+  $xlate{$from} = $to;
+}
+
+if ( $opt_t ) {
+  open(my $fh, "<", $opt_t) || die "Cannot open <$opt_t>,";
+  while (<$fh>) {
+    chomp;
+    if (/^#/) {
+      next;
+    }
+    if (/^$/) {
+      next;
+    }
+    my ($a,$b,$extra) = split(" ");
+    ( defined($b) && !defined($extra) )
+      || die "Ill-formed translation: <$_>,";
+    (!defined($xlate{$a}))
+      || die "Multiple translations: <$a>,";
+    $xlate{$a} = $b;
+  }
+  close $fh;
+}
+
+# ------------------------------------------------------------------------
+# Process the fna file
+# ------------------------------------------------------------------------
+
+while (<STDIN>) {
+  if (/^>([^ ]+)/) {
+    if ( $xlate{$1} ) {
+      print ">",$xlate{$1},"\n";
+    } else {
+      print;
+    }
+  } else {
+    print;
+  }
+}

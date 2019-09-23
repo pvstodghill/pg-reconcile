@@ -1,0 +1,36 @@
+#! /bin/bash
+
+URL_BASE=ftp://ftp.ncbi.nlm.nih.gov/genomes/all
+
+set -e
+
+function accession_path {
+    echo "$1" | sed -r -e 's|^(GC.)_(...)(...)(...)\..*$|\1/\2/\3\/\4/&|'
+}
+
+if [ -z "$2" -o "$3" ] ; then
+    echo 1>&2 "Usage: $0 accession output_dir"
+    exit 1
+fi
+
+
+accession="$1" ; shift 1
+output_dir="$1" ; shift 1
+
+if [ -e "$output_dir" ] ; then
+    echo 1>&2 "Output dir already exists: <<$output_dir>>"
+    exit 1
+fi
+
+url_path=$(accession_path $accession)
+
+mkdir -p ${output_dir}
+set -x
+cd ${output_dir}
+wget -q -nd ${URL_BASE}/${url_path}/*.*
+
+
+
+
+
+

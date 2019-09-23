@@ -1,0 +1,32 @@
+#! /bin/bash
+
+SCRIPTS_DIR=$(dirname $0)
+
+names=$1
+asm_dir=$2
+gen_dir=$3
+
+rm -rf ${gen_dir}
+mkdir ${gen_dir}
+
+# ------------------------------------------------------------------------
+
+ls ${asm_dir}/*_genomic.fna.gz \
+    | fgrep -v _from_ \
+    | xargs pigz -dc \
+    | ${SCRIPTS_DIR}/xlate-fna-accessions -t ${names} \
+    | cat > ${gen_dir}/genome.fna
+
+ls ${asm_dir}/*_protein.faa.gz | xargs pigz -dc > ${gen_dir}/proteome.faa
+
+pigz -dc ${asm_dir}/*.gff.gz \
+    | ${SCRIPTS_DIR}/xlate-gff-seqnames -t ${names} \
+    | cat > ${gen_dir}/annotation.gff
+
+# ------------------------------------------------------------------------
+
+ls ${asm_dir}/*_genomic.fna.gz | fgrep -v _from_ | xargs ${SCRIPTS_DIR}/ncbi-split-fxa -d ${gen_dir}
+#ls ${asm_dir}/*_protein.faa.gz | xargs ${SCRIPTS_DIR}/ncbi-split-fxa -d ${gen_dir}
+${SCRIPTS_DIR}/ncbi-split-gff -d ${gen_dir} ${asm_dir}/*.gff.gz
+${SCRIPTS_DIR}/ncbi-split-gxff -d ${gen_dir} ${asm_dir}/*.gbff.gz
+

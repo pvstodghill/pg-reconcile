@@ -1,0 +1,44 @@
+#! /bin/bash
+
+set -e
+
+function usage {
+    echo 1>&2 "Usage: $0 /.../accession_genomic.g?ff.gz"
+    echo 1>&2 "-h - this message"
+    echo 1>&2 "-d DIR - dest dir, make if needed"
+    exit "$@"
+}    
+
+opt_d=.
+
+while getopts 'd:h' opt ; do
+    case "$opt" in
+	h) opt_h=1 ;;
+	d) opt_d="$OPTARG" ;;
+	\?) usage 1 ;;
+	*) echo "Can't happen" ; exit 1 ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ "$opt_h" ] ; then
+    usage
+fi
+
+mkdir -p "$opt_d"
+
+for gxff in "$@" ; do
+
+    gunzip -c "$gxff"\
+	| ( cd "$opt_d" ; csplit -s -z -n6 - '/^LOCUS /' '{*}' )
+
+    (
+	cd "$opt_d"
+
+	find -name 'xx*' -print \
+	    | xargs -l1 egrep -m1 . /dev/null \
+	    | sed -e 's/^\([^ ][^ ]*\):LOCUS *\([^ ][^ ]*\).*/mv -i \1 \2.gbk/' \
+	    | bash
+    )
+
+done

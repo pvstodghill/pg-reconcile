@@ -1,0 +1,79 @@
+#! /usr/bin/env perl
+
+use strict;
+use warnings;
+
+# Script to demux a GBK file into accession specific GBK files.
+
+# Usage:
+# $ rm -f *.gbk
+# $ cat ..../input.gbk | split-gbk
+# $ ls
+# AE016853.gbk  CP000058.gbk  CP000075.gbk
+# $ rm -f *.gbk
+# $ cat ..../input.gbk | split-gbk foo
+# $ ls
+# AE016853_foo.gbk  CP000058_foo.gbk  CP000075_foo.gbk
+# $ 
+
+# ------------------------------------------------------------------------
+
+use File::Basename;
+use Getopt::Std;
+
+our $opt_d = ".";
+our $opt_h;
+our $opt_n;
+
+sub usage {
+  my $progname = basename($0);
+  print STDERR "Usage: $progname [options] [tag]\n";
+  print STDERR "-d DIR - output dir [$opt_d]\n";
+  print STDERR "-h - print help\n";
+  print STDERR "-n - strip version from accession\n";
+  exit(@_);
+}
+
+my $stat = getopts('d:hn');
+if (!$stat) {
+  usage(1);
+}
+if ($opt_h) {
+  usage();
+}
+
+my ($tag) = @ARGV;
+if (defined($tag)) {
+  $tag = "_".$tag;
+} else {
+  $tag = "";
+}
+
+# ------------------------------------------------------------------------
+
+chdir($opt_d) || die "Cannot change to <<$opt_d>>,";
+
+# ------------------------------------------------------------------------
+
+my $fh;
+
+while (<STDIN>) {
+  chomp;
+  if ( /^LOCUS +([^ ]+)/ ) {
+    my $accession = $1;
+    if (defined($fh)) {
+      close $fh || die;
+    }
+    if ( $opt_n ) {
+      $accession =~ s/\.[0-9]+$//;
+    }
+    my $filename = $accession.$tag.".gbk";
+    open($fh, ">", $filename)
+      || die "Cannot open <<$filename>>\n";
+  }
+  (defined($fh)) || die "line=<<$_>>";
+  print $fh $_,"\n";
+}
+if (defined($fh)) {
+  close $fh || die;
+}

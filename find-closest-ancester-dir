@@ -1,0 +1,30 @@
+#! /bin/bash
+
+# swiped from https://stackoverflow.com/questions/12340846/bash-shell-script-to-find-the-closest-parent-directory-of-several-files
+
+function common_path()
+{
+  lhs=$1
+  rhs=$2
+  path=
+  OLD_IFS=$IFS; IFS=/
+  for w in $rhs; do
+    test "$path" = / && try="/$w" || try="$path/$w"
+    case $lhs in
+      $try*) ;;
+      *) break ;;
+    esac
+    path=$try
+  done
+  IFS=$OLD_IFS
+  echo $path
+}
+
+root=$(realpath "$1")
+shift 1
+for f in "$@" ; do
+    root=$(common_path "$root" "$(realpath "$f")")
+done
+
+realpath --relative-to=. "$root"
+

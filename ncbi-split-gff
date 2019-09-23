@@ -1,0 +1,96 @@
+#! /usr/bin/env perl
+
+use strict;
+use warnings;
+use Carp::Always;
+
+use constant { TRUE => 1, FALSE => 0 };
+
+use File::Basename;
+use Getopt::Std;
+
+our $opt_d = ".";
+our $opt_h;
+our $opt_t;
+
+sub usage {
+  my $progname = basename($0);
+  print STDERR "Usage: $progname [options] /.../accession_genomic.gff.gz\n";
+  print STDERR "-d DIR - dest dir, make if needed\n";
+  print STDERR "-t TAG - add TAG to filename\n";
+  print STDERR "-h - print help\n";
+  exit(@_);
+}
+
+my $stat = getopts('d:ht:');
+if (!$stat) {
+  usage(1);
+}
+if ($opt_h) {
+  usage();
+}
+
+# This is ugly. But simple.
+(0==system("mkdir -p \"$opt_d\"")) || die;
+
+
+foreach my $file (@ARGV) {
+
+  my @preamble;
+  my %accessions;
+  open(my $input_fh, "-|", "gunzip -c \"$file\"") || die;
+  while (<$input_fh>) {
+    if ( /^#/ ) {
+      push @preamble, $_;
+      next;
+    }
+    my ($seqname) = split(/\t/,$_);
+    my $a = $accessions{$seqname};
+    if ( !defined($a) ) {
+      $a = $accessions{$seqname} = [];
+    }
+    push @$a, $_;
+  }
+  close $input_fh;
+
+  my @seqnames = sort(keys %accessions);
+  foreach my $seqname (@seqnames) {
+
+    my $filename = $seqname;
+    $filename =~ s/\.[0-9]+$//;
+    ( $filename =~ /[^A-Za-z0-9_]/ )
+      && die("FIXME: Cannot make filename from <<$seqname>>,");
+    if ( $opt_t ) {
+      $filename = $filename."_".$opt_t;
+    }
+    $filename = $opt_d."/".$filename.".gff";
+
+
+    open(my $output_fh,">",$filename) || die;
+
+    # Print the preamble.
+    # This is an ugly quadratic loop.
+  line:
+    foreach my $l ( @preamble ) {
+    seqname2:
+      foreach my $seqname2 (@seqnames) {
+	if ( $seqname eq $seqname2 ) {
+	  next seqname2;
+	}
+	if ( -1 < index($l,$seqname2) ) {
+	  next line;
+	}
+      }
+      print $output_fh $l;
+    }
+
+    # Print the features
+    foreach my $l ( @{$accessions{$seqname}} ) {
+      print $output_fh $l;
+    }
+
+    # done with $seqname
+    close($output_fh);
+  }
+
+}

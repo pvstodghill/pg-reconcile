@@ -1,0 +1,171 @@
+#! /bin/bash
+
+set -e
+
+PROGNAME=`basename $0`
+PROGDIR=`dirname $0`
+
+if [ -f packages.yaml ] ; then
+    PACKAGES_YAML=packages.yaml
+elif [ -f $PROGDIR/packages.yaml ] ; then
+    PACKAGES_YAML=$PROGDIR/packages.yaml
+else
+    echo 1>&2 cannot find packages.yaml
+    exit 1
+fi
+
+function usage {
+    echo 1>&2 "Usage: $PROGNAME [options] replicon1.fna ..."
+
+    echo 1>&2 "-G STR - Gram status, pos or neg (*)"
+    echo 1>&2 "-S STR - Strain (*)"
+    echo 1>&2 "-d DIR - Representative genomes directory"
+    echo 1>&2 "-g STR - Genus (*)"
+    echo 1>&2 "-h - this message"
+    echo 1>&2 "-s STR - Species (*)"
+    echo 1>&2 "-p STR - Locus tag prefix"
+    echo 1>&2 "-t DIR - temp directory [$opt_t]"
+    echo 1>&2 "-o DIR - output directory [$opt_o]"
+    echo 1>&2 "(*) required option"
+
+    exit "$@"
+}    
+
+opt_t=temp
+opt_o=results
+opt_t=gene
+
+while getopts 'G:S:d:g:ho:p:s:t:' opt ; do
+    case "$opt" in
+
+	G) opt_G="$OPTARG" ;;
+	S) opt_S="$OPTARG" ;;
+	d) opt_d="$OPTARG" ;;
+	g) opt_g="$OPTARG" ;;
+	h) opt_h=1 ;;
+	o) opt_o="$OPTARG" ;;
+	p) opt_p="$OPTARG" ;;
+	s) opt_s="$OPTARG" ;;
+	t) opt_t="$OPTARG" ;;
+
+	\?) usage 1 ;;
+	*) echo "Can't happen" ; exit 1 ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ "$opt_h" ] ; then
+    usage
+fi
+
+if [ -z "$opt_g" -o -z "$opt_s" -o -z "$opt_G" -o -z "$opt_S" ] ; then
+    usage 1
+fi
+if [ -z "$1" ] ; then
+    usage 1
+fi
+
+if [ -e "$opt_t" ] ; then
+    echo 1>&2 "Dir exists, please remove: $opt_t"
+    exit 1
+fi
+if [ -e "$opt_o" ] ; then
+    echo 1>&2 "Dir exists, please remove: $opt_o"
+    exit 1
+fi
+
+# ------------------------------------------------------------------------
+
+ROOT_DIR=$($PROGDIR/find-closest-ancester-dir $PROGDIR "$@")
+
+if [ -z "$USE_NATIVE" ] ; then
+    # use docker
+    [ "$HOWTO" ] || HOWTO="$PROGDIR/howto -f $PACKAGES_YAML -m $ROOT_DIR"
+    [ "$THREADS" ] || THREADS=$($PROGDIR/howto -f $PACKAGES_YAML -q -c prokka nproc)
+else
+    # go native
+    HOWTO=
+    THREADS=$(nproc)
+fi
+
+if [ -z "$USE_NATIVE" ] ; then
+    HOWTO_prokka="${HOWTO} -c prokka"
+else
+    HOWTO_prokka=
+fi
+
+# ------------------------------------------------------------------------
+
+GRAM="$opt_G"
+GENUS="$opt_g"
+SPECIES="$opt_s"
+STRAIN="$opt_S"
+TAG="$opt_p"
+
+mkdir -p $opt_o
+mkdir -p $opt_t
+
+# ------------------------------------------------------------------------
+
+rm -f $opt_t/genome.fna
+for f in "$@" ; do
+    case "$f" in
+	*.fasta.gz|*.fna.gz)
+	    gzip -dc $f >> $opt_t/genome.fna
+	    ;;
+	*.fasta|*.fna)
+	    cat $f >> $opt_t/genome.fna
+	    ;;
+	*)
+	    echo 1>&2 "Don't know how to deal with: $f"
+	    exit 1
+    esac
+done
+
+# ------------------------------------------------------------------------
+
+if [ -f $opt_d/${GENUS}.faa ] ; then
+    USEGENUS_FLAG=--usegenus
+    cat <<EOF > $opt_t/run-prokka.bash
+cp $opt_d/${GENUS}.p* /opt/prokka/db/genus/
+EOF
+else
+    USEGENUS_FLAG=
+fi
+
+cat <<EOF > $opt_t/run-prokka.bash
+prokka \
+     --outdir $opt_t/prokka_out \
+     --genus ${GENUS} \
+     --species ${SPECIES} \
+     --strain ${STRAIN} \
+     --prefix target \
+     --locustag ${TAG} ${USEGENUS_FLAG} \
+     --rfam \
+     --gram ${GRAM} \
+     --quiet \
+     $opt_t/genome.fna
+EOF
+
+chmod +x $opt_t/run-prokka.bash
+
+# ------------------------------------------------------------------------
+
+(
+    set -x
+    ${HOWTO_prokka} bash -x $opt_t/run-prokka.bash
+)
+
+T=$(realpath --relative-to $opt_o $opt_t)
+S=$(realpath --relative-to $opt_o $PROGDIR)
+
+(
+    set -x
+    cd $opt_o
+    cat $T/prokka_out/target.gbk | $S/split-gbk
+    cat $T/prokka_out/target.gff | $S/split-gff
+    cat $T/prokka_out/target.fna | $S/split-fasta
+    cp $T/prokka_out/target.faa proteome.faa
+    cp $T/prokka_out/target.fna genome.fna
+    cat $T/prokka_out/target.gff | sed -e '/^##FASTA/,$d' > annotation.gff
+)

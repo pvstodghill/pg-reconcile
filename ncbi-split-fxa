@@ -1,0 +1,52 @@
+#! /bin/bash
+
+set -e
+
+function usage {
+    echo 1>&2 "Usage: $0 /.../accession_genomic.f?a.gz"
+    echo 1>&2 "-d DIR - dest dir, make if needed"
+    echo 1>&2 "-h - this message"
+    exit "$@"
+}    
+
+opt_d=.
+
+while getopts 'd:h' opt ; do
+    case "$opt" in
+	h) opt_h=1 ;;
+	d) opt_d="$OPTARG" ;;
+	\?) usage 1 ;;
+	*) echo "Can't happen" ; exit 1 ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ "$opt_h" ] ; then
+    usage
+fi
+
+mkdir -p "$opt_d"
+
+for fxa in "$@" ; do
+
+    case "$fxa" in
+	*.fna.gz) suffix=fna ;;
+	*.faa.gz) suffix=faa ;;
+	*)
+	    echo 1>&2 "Cannot happen"
+	    exit
+    esac
+
+    gunzip -c "$fxa"\
+	| ( cd "$opt_d" ; csplit -s -z -n6 - '/^>/' '{*}' )
+
+    (
+	cd "$opt_d"
+
+	find -name 'xx*' -print \
+	    | xargs -l1 egrep -m1 . /dev/null \
+	    | sed -e 's/^\([^ ][^ ]*\):>\([^ .][^ .]*\).*/mv -i \1 \2.'$suffix'/' \
+	    | bash
+    )
+    
+done
