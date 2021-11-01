@@ -20,11 +20,27 @@ function common_path()
   echo $path
 }
 
-root=$(realpath "$1")
+function usage {
+    echo 1>&2 "Usage: $0 dir1 dir2 ..."
+    echo 1>&2 ""
+    echo 1>&2 "Find the directory that is the closest common ancestor of"
+    echo 1>&2 "dir1, dir2, .... Print the path to the closest"
+    echo 1>&2 "common directory, relative to \".\"."
+    exit $1
+}
+
+if [ "$1" = "-h" ] ; then
+    usage 0
+fi
+if [ -z "$1" ] ; then
+    usage 1
+fi
+
+ca_dir=$(realpath "$1")
 shift 1
 for f in "$@" ; do
-    root=$(common_path "$root" "$(realpath "$f")")
+    ca_dir=$(common_path "$ca_dir" "$(realpath "$f")")
 done
 
-realpath --relative-to=. "$root"
+realpath --relative-to=. "$ca_dir"
 

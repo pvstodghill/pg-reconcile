@@ -5,7 +5,12 @@ use warnings;
 use English;
 use Cwd 'abs_path';
 
+use File::Temp qw{:mktemp};
+
 use constant { TRUE => 1, FALSE => 0 };
+
+my ($_gid) = split(/ /,$GID);
+my $_uid = $UID;
 
 # ------------------------------------------------------------------------
 # Read command line
@@ -14,15 +19,18 @@ use constant { TRUE => 1, FALSE => 0 };
 use File::Basename;
 use Getopt::Std;
 
+our $opt_b = $ENV{HOWTO_BACKEND} || "singularity";
 our $opt_c;
-our $opt_m = ".";
+our $opt_e = "";
 our $opt_f;
 our $opt_h;
 our $opt_l;
+our $opt_m = $ENV{HOWTO_MOUNT_DIR} || ".";
+our $opt_n;
 our $opt_p;
 our $opt_q;
-our $opt_t;
 our $opt_s;
+our $opt_t;
 our $opt_v;
 
 sub usage {
@@ -32,11 +40,14 @@ sub usage {
   print STDERR "Usage: $progname [options] -p cmd1 cmd2\n";
   print STDERR "Usage: $progname [options] -p '*'\n";
 
-  print STDERR "-c other_cmd - use image for other_cmd to run cmd\n";
+  print STDERR "-b BACKEND - \"docker", \"singularity\" [$opt_b]\n";
+  print STDERR "-c alt_cmd - use image for alt_cmd to run cmd\n";
+  print STDERR "-e VAR1,VAR2,... - export values of environment variables VAR1,VAR2,... to docker\n";
   print STDERR "-f FILENAME - config file [./.howto.yaml or ~/.howto.yaml]\n";
   print STDERR "-h - print help\n";
   print STDERR "-l - list known commands and images\n";
-  print STDERR "-m DIR - mount directory tree DIR\n";
+  print STDERR "-m DIR - mount directory tree DIR [\$HOWTO_MOUNT_DIR or \".\"]\n";
+  print STDERR "-n - dryrun. print but do not execute commands. implies -v\n";
   print STDERR "-p - pull packages\n";
   print STDERR "-q - quiet, suppress all output\n";
   print STDERR "-s - open a shell instead of running the command\n";
@@ -46,13 +57,23 @@ sub usage {
   exit(@_);
 }
 
-my $stat = getopts('c:f:hlm:pqstv');
+my $stat = getopts('b:c:e:f:hlm:npqstv');
 if (!$stat) {
   usage(1);
 }
 if ($opt_h) {
   usage();
 }
+
+if ( $opt_n ) {
+  $opt_v = TRUE;
+}
+
+$opt_b = lc($opt_b);
+
+( $opt_b eq "docker" )
+  || ( $opt_b eq "singularity" )
+  || usage(1);
 
 # ------------------------------------------------------------------------
 # Figure out mount and working directories
@@ -85,7 +106,7 @@ if ( $opt_f ) {
   ( -r $opt_f ) || die "Cannot read <<$opt_f>>,";
   $config_file = $opt_f;
 } else {
-  foreach my $file ( "./.howto.yaml", "$ENV{HOME}/.howto.yaml" ) {
+  foreach my $file ( "howto.yaml", ".howto.yaml" , "$ENV{HOME}/.howto.yaml" ) {
     if ( -r $file ) {
       $config_file = $file;
       last;
@@ -104,14 +125,15 @@ my @config_elements = YAML::LoadFile($config_file);
 # Parse the config elements
 # ------------------------------------------------------------------------
 
-my %is_command;
 my %image_of;
-my %version_of;
-my %is_centos;
+my %is_command;
 my %is_gui;
-my %is_tty;
-my %is_java;
 my %is_implicit;
+my %is_java;
+my %is_pvs;
+my %is_tty;
+my %user_of;
+my %version_of;
 
 foreach my $x ( @config_elements ) {
   my $ref_type = ref $x;
@@ -125,7 +147,6 @@ foreach my $x ( @config_elements ) {
 
   foreach my $key ( keys %$x) {
 
-    next if ($key eq "centos");
     next if ($key eq "command");
     next if ($key eq "commands");
     next if ($key eq "direct");
@@ -133,10 +154,12 @@ foreach my $x ( @config_elements ) {
     next if ($key eq "image");
     next if ($key eq "implicit");
     next if ($key eq "java");
+    next if ($key eq "pvs");
     next if ($key eq "tty");
+    next if ($key eq "user");
     next if ($key eq "version");
 
-    die "Unexpected key <<$key>>,";
+    print STDERR "# ignoring unexpected key: <<$key>>\n";
   }
 
   my $chunk_direct = defined($x->{direct}) ? bool($x->{direct}) : FALSE;
@@ -149,12 +172,14 @@ foreach my $x ( @config_elements ) {
     die "Both 'direct' and 'image' are specified,";
   }
 
-  my $chunk_version = $x->{version} || "latest";
   my $chunk_gui =  $x->{gui} || "false";
-  my $chunk_tty =  $x->{tty} || "false";
-  my $chunk_java =  $x->{java} || "false";
-  my $chunk_centos =  $x->{centos} || "false";
   my $chunk_implicit =  $x->{implicit} || "false";
+  my $chunk_java =  $x->{java} || "false";
+  my $chunk_pvs =  $x->{pvs} || "false";
+  my $chunk_tty =  $x->{tty} || "false";
+  my $chunk_user =  $x->{user} || join(":",$_uid,$_gid);
+  my $chunk_version = $x->{version} || "latest";
+
   my @chunk_commands = ();
   if ( $x->{command} ) {
     push @chunk_commands, $x->{command};
@@ -186,6 +211,7 @@ foreach my $x ( @config_elements ) {
       next if ($key eq "gui");
       next if ($key eq "tty");
       next if ($key eq "java");
+      next if ($key eq "user");
 
       die "Unexpected key <<$key>>,";
     }
@@ -193,6 +219,7 @@ foreach my $x ( @config_elements ) {
     my $command_gui =  $z->{gui} || $chunk_gui;
     my $command_tty =  $z->{tty} || $chunk_tty;
     my $command_java =  $z->{java} || $chunk_java;
+    my $command_user =  $z->{user} || $chunk_user;
 
     if ( defined($is_command{$command_name}) ) {
       die "Duplicate command: $command_name,";
@@ -201,12 +228,13 @@ foreach my $x ( @config_elements ) {
     $is_command{$command_name} = TRUE;
     $image_of{$command_name} = $chunk_image;
     $version_of{$command_name} = $chunk_version;
-    $is_centos{$command_name} = bool($chunk_centos);
     $is_implicit{$command_name} = bool($chunk_implicit);
+    $is_pvs{$command_name} = bool($chunk_pvs);
 
     $is_gui{$command_name} = bool($command_gui);
     $is_tty{$command_name} = bool($command_tty);
     $is_java{$command_name} = bool($command_java);
+    $user_of{$command_name} = $command_user;
   }
 }
 
@@ -218,20 +246,134 @@ sub bool {
 }
 
 # ------------------------------------------------------------------------
-# Execute the command
+# Docker primative commands
+# ------------------------------------------------------------------------
+
+sub _docker_do_pull {
+  my ($image) = @_;
+  my $stat = run("docker","pull",$image);
+  if ( $stat != 0 ) {
+    return $stat;
+  }
+}
+
+sub _docker_do_exec {
+  my ($image_version,$alt_cmd,@exec_args) = @_;
+
+  my @docker_args;
+
+  if ( $is_pvs{$alt_cmd} || $image_version =~ /^pvstodghill\// ) {
+    # Mount the current directory as container:/mnt
+    push @docker_args, "-v", $mount_path.":/mnt";
+    push @docker_args, "-w", "/mnt".$cwd_suffix;
+  }
+  push @docker_args, "--user", $user_of{$alt_cmd};
+
+  # set TERM
+  push @docker_args, "-e", "TERM=".$ENV{TERM};
+  # Don't log. It fills the disk.
+  push @docker_args, "--log-driver=none";
+  # Delete the container when finished.
+  push @docker_args, "--rm";
+  # so piping commands work
+  push @docker_args, "-i";
+  # run interactively
+  if ( $opt_s || $opt_t || $is_tty{$alt_cmd} ) {
+    push @docker_args, "-t";
+  }
+  # For Java commands, pass Java flags
+  if ( $is_java{$alt_cmd} ) {
+    my $JVM_FLAGS=$ENV{JVM_FLAGS};
+    if ( defined($JVM_FLAGS) ) {
+      push @docker_args, "-e", "\"JVM_FLAGS=$JVM_FLAGS\""
+    }
+  }
+  # For GUI commands, pass X11 flags
+  if ( $is_gui{$alt_cmd} ) {
+    my $DISPLAY = $ENV{DISPLAY};
+    ( defined($DISPLAY) ) || die "GUI command, but \$DISPLAY is not set,";
+    if ( $OSNAME eq "linux" ) {
+      push @docker_args, "-e", "DISPLAY=$DISPLAY";
+      push @docker_args, "-v", "/tmp/.X11-unix:/tmp/.X11-unix";
+    } elsif ( $OSNAME eq "darwin" ) {
+      push @docker_args, darwin_x11_args();
+    } else {
+      die "Cannot start GUI commands on <<$OSNAME>>,";
+    }
+  }
+  # export the variables
+  foreach my $var ( split(/,/, $opt_e) ) {
+    # fixme: should value better quoted?
+    push @docker_args, "-e", ($var."=".$ENV{$var});
+  }
+
+  my $error = run("docker", "run", @docker_args, $image_version, @exec_args);
+
+  return $error;
+}
+
+# ------------------------------------------------------------------------
+# Singularity primative commands
+# ------------------------------------------------------------------------
+
+sub _singularity_do_pull {
+  my ($image) = @_;
+  $image = "docker://".$image;
+
+  # this is not ideal...
+  my $temp_sif = mktemp( "/tmp/howtoXXXXX" );
+
+  my $stat = run("singularity","pull",$temp_sif, $image);
+
+  unlink($temp_sif);
+
+  if ( $stat != 0 ) {
+    return $stat;
+  }
+}
+
+sub _singularity_do_exec {
+  my ($image_version,$alt_cmd,@exec_args) = @_;
+
+  my @singularity_args;
+
+  if ( $is_pvs{$alt_cmd} || $image_version =~ /^pvstodghill\// ) {
+    push @singularity_args, "-e"; # clean environment
+    # Mount the current directory as container:/mnt
+    push @singularity_args, "-c"; # use minimal /dev
+    push @singularity_args, "-B", $mount_path.":/mnt";
+    push @singularity_args, "-H", $mount_path.":/mnt";
+    push @singularity_args, "--pwd", "/mnt".$cwd_suffix;
+  }
+
+  if ( $is_gui{$alt_cmd} ) {
+    my $DISPLAY = $ENV{DISPLAY};
+    ( defined($DISPLAY) ) || die "GUI command, but \$DISPLAY is not set,";
+    push @singularity_args, "-B", "/tmp/.X11-unix:/tmp/.X11-unix";
+    @exec_args = ( "env", "DISPLAY=$DISPLAY", @exec_args );
+  }
+
+
+  $ENV{LC_ALL} = 'C';
+  $image_version = "docker://".$image_version;
+  my $error = run("singularity", "run", @singularity_args, $image_version, @exec_args);
+
+  return $error;
+}
+
+
+# ------------------------------------------------------------------------
+# The command implementations
 # ------------------------------------------------------------------------
 
 my @all_names = sort (keys(%is_command));
 
-my $exit_stat;
-if ( $opt_l ) {
-  $exit_stat = do_list();
-} elsif ( $opt_p ) {
-  $exit_stat = do_pull();
-} else {
-  $exit_stat = do_exec();
-}
-exit($exit_stat);
+# ------------------------------------------------------------------------
+
+my ($_pull,$_exec);
+($_pull,$_exec) = (\&_docker_do_pull,\&_docker_do_exec) if ( $opt_b eq "docker");
+($_pull,$_exec) = (\&_singularity_do_pull,\&_singularity_do_exec) if ( $opt_b eq "singularity");
+(defined($_pull) && defined($_exec)) || die "can't happen,";
 
 # ------------------------------------------------------------------------
 
@@ -270,7 +412,7 @@ sub do_pull {
   }
 
   foreach my $image (sort(keys %to_pull)) {
-    my $stat = run("docker","pull",$image);
+    my $stat = $_pull->($image);
     if ( $stat != 0 ) {
       return $stat;
     }
@@ -283,86 +425,66 @@ sub do_pull {
 
 sub do_exec {
 
-  my ($cmd_name,@cmd_args) = @ARGV;
-  if (!defined($cmd_name)) {
+  my ($exec_cmd,@cmd_args) = @ARGV;
+  if (!defined($exec_cmd)) {
     usage(1);
   }
-  my $cmd2_name = $cmd_name;
-  if ( $opt_c ) { $cmd2_name = $opt_c; }
+  my $alt_cmd = $exec_cmd;
+  if ( $opt_c ) { $alt_cmd = $opt_c; }
   
-  my $image = $image_of{$cmd2_name};
+  my $image = $image_of{$alt_cmd};
   if ( !defined($image) ) {
-    return run($cmd_name,@cmd_args);
+    return run($exec_cmd,@cmd_args);
   }
-  my $version = $version_of{$cmd2_name};
+  my $version = $version_of{$alt_cmd};
   my $image_version = $image.":".$version;
 
-  my @args;
-  if ( $image =~ /^pvstodghill\// || $image eq "scratch" ) {
-    # Mount the current directory as container:/mnt
-    push @args, "-v", $mount_path.":/mnt";
-    push @args, "-w", "/mnt".$cwd_suffix;
-  }
-  if ( $is_centos{$cmd2_name} ) {
-    # This may be questionable. need for centos?
-    #push @args, "--user", $UID.":".$GID; # <- GID is a list
-    push @args, "--user", $UID;
-  }
+  my @exec_args;
 
-  # Don't log. It fills the disk.
-  push @args, "--log-driver=none";
-  # Delete the container when finished.
-  push @args, "--rm";
-  # so piping commands work
-  push @args, "-i";
-  # run interactively
-  if ( $opt_s || $opt_t || $is_tty{$cmd2_name} ) {
-    push @args, "-t";
-  }
-  # For Java commands, pass Java flags
-  if ( $is_java{$cmd2_name} ) {
-    my $JVM_FLAGS=$ENV{JVM_FLAGS};
-    if ( defined($JVM_FLAGS) ) {
-      push @args, "-e", "\"JVM_FLAGS=$JVM_FLAGS\""
-    }
-  }
-  # For GUI commands, pass X11 flags
-  if ( $is_gui{$cmd2_name} ) {
-    my $DISPLAY = $ENV{DISPLAY};
-    ( defined($DISPLAY) ) || die "GUI command, but \$DISPLAY is not set,";
-    if ( $OSNAME eq "linux" ) {
-      push @args, "-e", "DISPLAY=$DISPLAY";
-      push @args, "-v", "/tmp/.X11-unix:/tmp/.X11-unix";
-    } elsif ( $OSNAME eq "darwin" ) {
-      push @args, darwin_x11_args();
-    } else {
-      die "Cannot start GUI commands on <<$OSNAME>>,";
-    }
-  }
-
-  push @args, $image_version;
-
- if ( $opt_s ) {
-   push @args, "/bin/bash";
+  if ( $opt_s ) {
+    ( ! $is_implicit{$alt_cmd} )
+      || die "-s does not work (probably) with implicit commands,";
+    push @exec_args, "/bin/bash";
   } else {
-    if ( ! $is_implicit{$cmd2_name} ) {
-      push @args, $cmd_name;
+    if ( ! $is_implicit{$alt_cmd} ) {
+      push @exec_args, $exec_cmd;
     }
-    push @args, @cmd_args;
+    push @exec_args, @cmd_args;
   }
 
   if (!$opt_q) {
     print STDERR "### $image_version\n";
   }
 
-  return run("docker", "run", @args);
+  my $error = $_exec->($image_version,$alt_cmd,@exec_args);
+
+  return $error;
 }
+
+# ------------------------------------------------------------------------
+# Execute the command
+# ------------------------------------------------------------------------
+
+my $exit_stat;
+if ( $opt_l ) {
+  $exit_stat = do_list();
+} elsif ( $opt_p ) {
+  $exit_stat = do_pull();
+} else {
+  $exit_stat = do_exec();
+}
+exit($exit_stat);
 
 # ------------------------------------------------------------------------
 
 sub run {
   diag(join(" ","++",@_));
-  my $stat = system(@_);
+  my $stat;
+  if ( $opt_n ) {
+    $stat = 0;
+  } else {
+    $stat = system(@_);
+  }
   # copied from perlfunc(1)
   if ($? == -1) {
     print STDERR "### failed to execute: $!\n";
